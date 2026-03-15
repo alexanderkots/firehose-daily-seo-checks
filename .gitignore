@@ -1,0 +1,11 @@
+# Generated digests
+digest_*.txt
+digest_*.html
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment
+.env
