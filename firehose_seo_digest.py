@@ -1,20 +1,6 @@
 #!/usr/bin/env python3
 """
-Firehose Daily SEO Digest
-Consumes 24h of buffered SSE events and generates a structured report.
-
-Usage:
-    export FIREHOSE_TAP_TOKEN=fh_your_token
-    python firehose_digest.py
-
-Optional env vars:
-    FIREHOSE_SINCE      - lookback window (default: 24h)
-    FIREHOSE_LIMIT      - max events to consume (default: 10000)
-    FIREHOSE_TIMEOUT    - SSE connection timeout in seconds (default: 120)
-    SLACK_WEBHOOK_URL   - if set, posts digest to Slack
-    RESEND_API_KEY      - if set, sends digest via Resend email
-    RESEND_TO           - recipient email (required if RESEND_API_KEY is set)
-    RESEND_FROM         - sender email (default: digest@notprovided.eu)
+Firehose Daily SEO Digest — taxesforexpats.com
 """
 
 import json
@@ -83,7 +69,10 @@ class MatchedPage:
         doc = data.get("document", {})
         diff = doc.get("diff", {})
         chunks = diff.get("chunks", [])
-        qid = data.get("query_id", "")
+
+        # FIX: API returns query_ids (list), not query_id (string)
+        query_ids = data.get("query_ids", [])
+        qid = query_ids[0] if query_ids else ""
         rule = rules.get(qid, {})
 
         return cls(
@@ -105,7 +94,6 @@ class MatchedPage:
 # ── API Functions ──────────────────────────────────────────────
 
 def api_request(path: str, method: str = "GET", body: dict = None) -> dict:
-    """Make an authenticated request to the Firehose API."""
     url = f"{BASE_URL}{path}"
     headers = {
         "Authorization": f"Bearer {TAP_TOKEN}",
@@ -118,13 +106,11 @@ def api_request(path: str, method: str = "GET", body: dict = None) -> dict:
 
 
 def fetch_rules() -> dict:
-    """Fetch all rules for the tap, return {id: rule} dict."""
     data = api_request("/v1/rules")
     return {r["id"]: r for r in data.get("data", [])}
 
 
-def consume_stream(rules: dict) -> list[MatchedPage]:
-    """Connect to SSE stream and consume all buffered events."""
+def consume_stream(rules: dict) -> list:
     url = f"{BASE_URL}/v1/stream?since={SINCE}&limit={LIMIT}&timeout={TIMEOUT}"
     req = urllib.request.Request(
         url, headers={"Authorization": f"Bearer {TAP_TOKEN}"}
@@ -168,8 +154,7 @@ def consume_stream(rules: dict) -> list[MatchedPage]:
 
 # ── Digest Builder ─────────────────────────────────────────────
 
-def build_digest(pages: list[MatchedPage]) -> str:
-    """Group events by tag and generate a text digest."""
+def build_digest(pages: list) -> str:
     by_tag = defaultdict(list)
     for p in pages:
         by_tag[p.rule_tag].append(p)
@@ -177,13 +162,12 @@ def build_digest(pages: list[MatchedPage]) -> str:
     now = datetime.now(timezone.utc)
     lines = []
     lines.append("=" * 50)
-    lines.append(f"  FIREHOSE DAILY SEO DIGEST")
+    lines.append(f"  FIREHOSE DAILY SEO DIGEST — taxesforexpats.com")
     lines.append(f"  {now:%A, %B %d, %Y} -- {now:%H:%M} UTC")
     lines.append(f"  Window: last {SINCE} | Events: {len(pages)}")
     lines.append("=" * 50)
     lines.append("")
 
-    # Summary counts
     lines.append("SUMMARY")
     lines.append("-" * 40)
     for tag in sorted(by_tag.keys()):
@@ -194,7 +178,6 @@ def build_digest(pages: list[MatchedPage]) -> str:
         lines.append(f"  [{tag}] {len(items)} total -- {new} new, {updated} updated, {removed} removed")
     lines.append("")
 
-    # Per-tag detail
     for tag in sorted(by_tag.keys()):
         items = by_tag[tag]
         lines.append(f"{'=' * 50}")
@@ -202,11 +185,10 @@ def build_digest(pages: list[MatchedPage]) -> str:
         lines.append(f"{'=' * 50}")
         lines.append("")
 
-        # Sort: NEW first, then UPDATED, then REMOVED
         priority = {"NEW": 0, "UPDATED": 1, "REMOVED": 2, "MATCH": 3}
         items.sort(key=lambda p: (priority.get(p.change_type, 9), p.matched_at))
 
-        for i, p in enumerate(items[:25]):  # cap per section
+        for i, p in enumerate(items[:25]):
             flag = f"[{p.change_type}]"
             lines.append(f"  {flag} {p.title or '(no title)'}")
             lines.append(f"         {p.url}")
@@ -233,8 +215,7 @@ def build_digest(pages: list[MatchedPage]) -> str:
     return "\n".join(lines)
 
 
-def build_html_digest(pages: list[MatchedPage]) -> str:
-    """Build a simple HTML version of the digest for email."""
+def build_html_digest(pages: list) -> str:
     by_tag = defaultdict(list)
     for p in pages:
         by_tag[p.rule_tag].append(p)
@@ -245,21 +226,17 @@ def build_html_digest(pages: list[MatchedPage]) -> str:
     html.append(f"""
     <html><body style="font-family: -apple-system, sans-serif; max-width: 700px; margin: 0 auto; padding: 20px; color: #374151;">
     <h1 style="color: #111827; border-bottom: 3px solid #FF6B35; padding-bottom: 8px;">
-        Firehose Daily Digest
+        Firehose Daily Digest — taxesforexpats.com
     </h1>
-    <p style="color: #6B7280;">{now:%A, %B %d, %Y} -- {len(pages)} events in the last {SINCE}</p>
+    <p style="color: #6B7280;">{now:%A, %B %d, %Y} — {len(pages)} events in the last {SINCE}</p>
     """)
 
     tag_colors = {
-        "comp-content": "#3B82F6",
-        "comp-removed": "#A855F7",
-        "link-opps": "#22C55E",
+        "comp-content":  "#3B82F6",
+        "link-opps":     "#22C55E",
         "link-listicle": "#22C55E",
-        "brand": "#FF6B35",
-        "own-site": "#6B7280",
-        "comp-launches": "#A855F7",
-        "intl": "#3B82F6",
-        "decay": "#EF4444",
+        "brand":         "#FF6B35",
+        "own-site":      "#6B7280",
     }
 
     for tag in sorted(by_tag.keys()):
@@ -271,7 +248,7 @@ def build_html_digest(pages: list[MatchedPage]) -> str:
         html.append(f"""
         <h2 style="color: {color}; margin-top: 28px;">
             [{tag}] <span style="font-weight: normal; font-size: 14px; color: #6B7280;">
-            {len(items)} events -- {new_count} new, {removed_count} removed</span>
+            {len(items)} events — {new_count} new, {removed_count} removed</span>
         </h2>
         """)
 
@@ -317,7 +294,7 @@ def build_html_digest(pages: list[MatchedPage]) -> str:
     html.append("""
     <hr style="border: 1px solid #E5E7EB; margin-top: 30px;">
     <p style="color: #9CA3AF; font-size: 11px; text-align: center;">
-        Firehose Daily Digest -- notprovided.eu
+        Firehose Daily Digest — taxesforexpats.com
     </p>
     </body></html>
     """)
@@ -328,14 +305,10 @@ def build_html_digest(pages: list[MatchedPage]) -> str:
 # ── Delivery ───────────────────────────────────────────────────
 
 def send_to_slack(digest: str):
-    """Post digest to Slack via webhook."""
     if not SLACK_WEBHOOK_URL:
         return
-
-    # Truncate for Slack (max ~40k chars)
     if len(digest) > 39000:
         digest = digest[:39000] + "\n\n... (truncated)"
-
     payload = json.dumps({"text": f"```{digest}```"}).encode()
     req = urllib.request.Request(
         SLACK_WEBHOOK_URL,
@@ -351,20 +324,16 @@ def send_to_slack(digest: str):
 
 
 def send_via_resend(html_digest: str, event_count: int):
-    """Send HTML digest via Resend API."""
     if not RESEND_API_KEY or not RESEND_TO:
         return
-
     now = datetime.now(timezone.utc)
-    subject = f"Firehose SEO Digest -- {now:%b %d} -- {event_count} events"
-
+    subject = f"Firehose SEO Digest — {now:%b %d} — {event_count} events"
     payload = json.dumps({
         "from": RESEND_FROM,
         "to": [RESEND_TO],
         "subject": subject,
         "html": html_digest,
     }).encode()
-
     req = urllib.request.Request(
         "https://api.resend.com/emails",
         data=payload,
@@ -383,7 +352,6 @@ def send_via_resend(html_digest: str, event_count: int):
 
 
 def save_to_file(digest: str, html_digest: str):
-    """Save digest to local files."""
     now = datetime.now(timezone.utc)
     date_str = now.strftime("%Y-%m-%d")
 
@@ -398,54 +366,43 @@ def save_to_file(digest: str, html_digest: str):
     print(f"  Saved: {html_path}")
 
 
-# ── Example Rule Setup ─────────────────────────────────────────
+# ── Rules ──────────────────────────────────────────────────────
 
 EXAMPLE_RULES = [
-    # Competitor content monitoring
-    {"value": 'domain:"competitor1.com" AND page_type:"/Article" AND recent:24h', "tag": "comp-content"},
-    {"value": 'domain:"competitor2.com" AND page_type:"/Article" AND recent:24h', "tag": "comp-content"},
-    {"value": 'domain:"competitor3.com" AND page_type:"/Article" AND recent:24h', "tag": "comp-content"},
-
-    # Removed content detection
-    {"value": 'removed:"target keyword" AND domain:"competitor1.com"', "tag": "comp-removed"},
-    {"value": 'removed:"target keyword" AND domain:"competitor2.com"', "tag": "comp-removed"},
-    {"value": 'removed:"target keyword" AND domain:"competitor3.com"', "tag": "comp-removed"},
-
-    # Link opportunity prospecting
-    {"value": 'added_anchor:"your keyword" AND page_type:"/Article" AND language:"en"', "tag": "link-opps"},
-    {"value": 'added_anchor:"your brand" AND language:"en"', "tag": "link-opps"},
-    {"value": 'added_anchor:"competitor brand" AND page_type:"/Article"', "tag": "link-opps"},
-
-    # Listicle and roundup finder
-    {"value": 'page_type:"/Article/Roundup" AND added:"your topic" AND language:"en"', "tag": "link-listicle"},
-    {"value": 'page_type:"/Article/Listicle" AND added:"your topic" AND language:"en"', "tag": "link-listicle"},
-
-    # Brand monitoring
-    {"value": 'added:"your brand" OR added_anchor:"your brand"', "tag": "brand"},
-    {"value": 'added:"according to" AND added:"your brand"', "tag": "brand"},
-
-    # Client site tracking
-    {"value": 'domain:"client.com" AND recent:24h', "tag": "own-site", "quality": False},
-
-    # Competitor launches
-    {"value": 'domain:"competitor1.com" AND (title:"new" OR title:"launch" OR title:"update")', "tag": "comp-launches"},
-    {"value": 'domain:"competitor2.com" AND page_type:"/Article/News_Update"', "tag": "comp-launches"},
-
-    # International SEO signals
-    {"value": 'added:"hreflang" AND domain:"competitor1.com"', "tag": "intl", "quality": False},
-    {"value": 'domain:"competitor1.com" AND (language:"nl" OR language:"de" OR language:"fr")', "tag": "intl"},
-
-    # Content decay signals
-    {"value": 'removed:"topic keyword" AND page_category:"/Business_and_Industrial"', "tag": "decay"},
-    {"value": 'removed:"topic keyword" AND page_category:"/Finance"', "tag": "decay"},
+    # --- Competitor Content Monitoring (7 rules) ---
+    {"value": 'domain:"brighttax.com" AND language:"en" AND recent:24h', "tag": "comp-content"},
+    {"value": 'domain:"greenbacktaxservices.com" AND language:"en" AND recent:24h', "tag": "comp-content"},
+    {"value": 'domain:"1040abroad.com" AND language:"en" AND recent:24h', "tag": "comp-content"},
+    {"value": 'domain:"hrblock.com" AND language:"en" AND recent:24h', "tag": "comp-content"},
+    {"value": 'domain:"myexpattaxes.com" AND language:"en" AND recent:24h', "tag": "comp-content"},
+    {"value": 'domain:"expattaxprofessionals.com" AND language:"en" AND recent:24h', "tag": "comp-content"},
+    {"value": 'domain:"expattaxonline.com" AND language:"en" AND recent:24h', "tag": "comp-content"},
+    # --- Link Opportunity Discovery (11 rules) ---
+    {"value": 'added_anchor:"expat tax" AND page_type:"/Article" AND language:"en"', "tag": "link-opps"},
+    {"value": 'added_anchor:"US expat taxes" AND page_type:"/Article" AND language:"en"', "tag": "link-opps"},
+    {"value": 'added_anchor:"expat tax filing" AND page_type:"/Article" AND language:"en"', "tag": "link-opps"},
+    {"value": 'added_anchor:"FBAR" AND page_type:"/Article" AND language:"en"', "tag": "link-opps"},
+    {"value": 'added_anchor:"streamlined filing" AND page_type:"/Article" AND language:"en"', "tag": "link-opps"},
+    {"value": 'added_anchor:"american expat tax" AND page_type:"/Article" AND language:"en"', "tag": "link-opps"},
+    {"value": 'page_type:"/Article/Roundup" AND added:"expat tax" AND language:"en"', "tag": "link-listicle"},
+    {"value": 'page_type:"/Article/Listicle" AND added:"expat tax" AND language:"en"', "tag": "link-listicle"},
+    {"value": 'page_type:"/Article/Roundup" AND added:"US expat" AND language:"en"', "tag": "link-listicle"},
+    {"value": 'page_type:"/Article/Listicle" AND (added:"FBAR" OR added:"FATCA") AND language:"en"', "tag": "link-listicle"},
+    {"value": 'page_type:"/Article/Listicle" AND added:"streamlined filing" AND language:"en"', "tag": "link-listicle"},
+    # --- Brand & Citation Monitoring (6 rules) ---
+    {"value": 'added:"Taxes for Expats" AND language:"en"', "tag": "brand"},
+    {"value": 'added_anchor:"Taxes for Expats" AND language:"en"', "tag": "brand"},
+    {"value": 'added:"taxesforexpats.com" AND language:"en"', "tag": "brand"},
+    {"value": 'added:"TFX" AND added:"expat tax" AND language:"en"', "tag": "brand"},
+    {"value": 'added:"according to" AND added:"Taxes for Expats" AND language:"en"', "tag": "brand"},
+    {"value": 'removed:"Taxes for Expats" AND language:"en"', "tag": "brand"},
+    # --- Own Site (1 rule) ---
+    {"value": 'domain:"taxesforexpats.com" AND recent:24h', "tag": "own-site", "quality": False},
 ]
 
 
 def setup_rules():
-    """Create rules from EXAMPLE_RULES. Run once to bootstrap a tap."""
     print("Setting up rules...")
-
-    # First fetch existing rules
     existing = api_request("/v1/rules")
     existing_values = {r["value"] for r in existing.get("data", [])}
 
@@ -454,7 +411,6 @@ def setup_rules():
         if rule["value"] in existing_values:
             print(f"  [SKIP] Already exists: {rule['tag']}")
             continue
-
         try:
             result = api_request("/v1/rules", method="POST", body=rule)
             rid = result.get("data", {}).get("id", "?")
@@ -472,19 +428,16 @@ def setup_rules():
 def main():
     if not TAP_TOKEN:
         print("Error: Set FIREHOSE_TAP_TOKEN environment variable.", file=sys.stderr)
-        print("  export FIREHOSE_TAP_TOKEN=fh_your_token_here")
         sys.exit(1)
 
-    # Check for setup command
     if len(sys.argv) > 1 and sys.argv[1] == "setup":
         setup_rules()
         return
 
-    print(f"Firehose Daily Digest")
+    print(f"Firehose Daily Digest — taxesforexpats.com")
     print(f"  Window: {SINCE}  |  Limit: {LIMIT}  |  Timeout: {TIMEOUT}s")
     print()
 
-    # Step 1: Fetch rules
     print("1. Fetching rules...")
     rules = fetch_rules()
     print(f"   Found {len(rules)} rules")
@@ -492,7 +445,6 @@ def main():
         print(f"   [{rule.get('tag', '?')}] {rule['value'][:70]}")
     print()
 
-    # Step 2: Consume stream
     print("2. Consuming SSE stream...")
     pages = consume_stream(rules)
     print(f"   Received {len(pages)} events")
@@ -502,18 +454,15 @@ def main():
         print(f"No events matched in the last {SINCE}. Check your rules.")
         return
 
-    # Step 3: Build digest
     print("3. Building digest...")
     digest = build_digest(pages)
     html_digest = build_html_digest(pages)
 
-    # Step 4: Deliver
     print("4. Delivering...")
     save_to_file(digest, html_digest)
     send_to_slack(digest)
     send_via_resend(html_digest, len(pages))
 
-    # Step 5: Print to stdout
     print()
     print(digest)
 
