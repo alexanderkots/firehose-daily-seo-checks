@@ -1,0 +1,48 @@
+name: Firehose Daily SEO Digest
+
+on:
+  schedule:
+    # Каждый день в 07:00 UTC (10:00 МСК)
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+    inputs:
+      since:
+        description: "Time window (e.g. 24h, 48h, 7d)"
+        required: false
+        default: "24h"
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run digest
+        env:
+          FIREHOSE_TAP_TOKEN: ${{ secrets.FIREHOSE_TAP_TOKEN }}
+          SLACK_WEBHOOK_URL:  ${{ secrets.SLACK_WEBHOOK_URL }}
+          RESEND_API_KEY:     ${{ secrets.RESEND_API_KEY }}
+          RESEND_TO:          ${{ secrets.RESEND_TO }}
+          RESEND_FROM:        ${{ secrets.RESEND_FROM }}
+          FIREHOSE_SINCE:     ${{ github.event.inputs.since || '24h' }}
+          FIREHOSE_LIMIT:     "10000"
+          FIREHOSE_TIMEOUT:   "120"
+        run: python firehose_seo_digest.py
+
+      - name: Upload digest artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ github.run_id }}
+          path: |
+            digest_*.txt
+            digest_*.html
+          retention-days: 30
