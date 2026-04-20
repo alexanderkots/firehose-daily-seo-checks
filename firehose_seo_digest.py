@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import urllib.request
+import urllib.error
 from datetime import datetime, timezone
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -70,7 +71,6 @@ class MatchedPage:
         diff = doc.get("diff", {})
         chunks = diff.get("chunks", [])
 
-        # FIX: API returns query_ids (list), not query_id (string)
         query_ids = data.get("query_ids", [])
         qid = query_ids[0] if query_ids else ""
         rule = rules.get(qid, {})
@@ -82,7 +82,7 @@ class MatchedPage:
             rule_tag=rule.get("tag", "unknown"),
             query_id=qid,
             page_type=", ".join(doc.get("page_types", [])),
-            page_category=", ".join(doc.get("page_category", [])),
+            page_category=", ".join(doc.get("page_categories", [])),
             language=doc.get("language", ""),
             added_text=[c["text"] for c in chunks if c["typ"] == "ins"],
             removed_text=[c["text"] for c in chunks if c["typ"] == "del"],
@@ -117,6 +117,7 @@ def consume_stream(rules: dict) -> list:
     )
 
     pages = []
+    skipped = 0
     event_type = None
     last_event_id = None
 
@@ -136,6 +137,12 @@ def consume_stream(rules: dict) -> list:
                 if event_type == "update":
                     try:
                         payload = json.loads(line[5:].strip())
+                        query_ids = payload.get("query_ids", [])
+                        qid = query_ids[0] if query_ids else ""
+                        # Пропускаем события от удалённых/неизвестных rule ID
+                        if qid not in rules:
+                            skipped += 1
+                            continue
                         pages.append(MatchedPage.from_event(payload, rules))
                     except json.JSONDecodeError as e:
                         print(f"  [WARN] Failed to parse event: {e}", file=sys.stderr)
@@ -149,6 +156,8 @@ def consume_stream(rules: dict) -> list:
                     break
 
     print(f"  Last event ID: {last_event_id}")
+    if skipped:
+        print(f"  Skipped {skipped} events from unknown/deleted rules")
     return pages
 
 
@@ -180,15 +189,15 @@ def build_digest(pages: list) -> str:
 
     for tag in sorted(by_tag.keys()):
         items = by_tag[tag]
-        lines.append(f"{'=' * 50}")
+        lines.append("=" * 50)
         lines.append(f"  [{tag.upper()}] -- {len(items)} events")
-        lines.append(f"{'=' * 50}")
+        lines.append("=" * 50)
         lines.append("")
 
         priority = {"NEW": 0, "UPDATED": 1, "REMOVED": 2, "MATCH": 3}
         items.sort(key=lambda p: (priority.get(p.change_type, 9), p.matched_at))
 
-        for i, p in enumerate(items[:25]):
+        for p in items[:25]:
             flag = f"[{p.change_type}]"
             lines.append(f"  {flag} {p.title or '(no title)'}")
             lines.append(f"         {p.url}")
@@ -232,11 +241,9 @@ def build_html_digest(pages: list) -> str:
     """)
 
     tag_colors = {
-        "comp-content":  "#3B82F6",
-        "link-opps":     "#22C55E",
-        "link-listicle": "#22C55E",
-        "brand":         "#FF6B35",
-        "own-site":      "#6B7280",
+        "comp-content": "#3B82F6",
+        "brand":        "#FF6B35",
+        "own-site":     "#6B7280",
     }
 
     for tag in sorted(by_tag.keys()):
@@ -268,7 +275,7 @@ def build_html_digest(pages: list) -> str:
             elif p.removed_text:
                 preview = f"<div style='color: #EF4444; font-size: 12px;'>- {html_escape(p.removed_text[0][:120])}...</div>"
 
-            safe_title = html_escape(p.title or '(no title)')
+            safe_title = html_escape(p.title or "(no title)")
             safe_url = html_escape(p.url)
             safe_domain = html_escape(p.domain)
             safe_page_type = html_escape(p.page_type)
@@ -377,18 +384,6 @@ EXAMPLE_RULES = [
     {"value": 'domain:"myexpattaxes.com" AND language:"en" AND recent:24h', "tag": "comp-content"},
     {"value": 'domain:"expattaxprofessionals.com" AND language:"en" AND recent:24h', "tag": "comp-content"},
     {"value": 'domain:"expattaxonline.com" AND language:"en" AND recent:24h', "tag": "comp-content"},
-    # --- Link Opportunity Discovery (11 rules) ---
-    {"value": 'added_anchor:"expat tax" AND page_type:"/Article" AND language:"en"', "tag": "link-opps"},
-    {"value": 'added_anchor:"US expat taxes" AND page_type:"/Article" AND language:"en"', "tag": "link-opps"},
-    {"value": 'added_anchor:"expat tax filing" AND page_type:"/Article" AND language:"en"', "tag": "link-opps"},
-    {"value": 'added_anchor:"FBAR" AND page_type:"/Article" AND language:"en"', "tag": "link-opps"},
-    {"value": 'added_anchor:"streamlined filing" AND page_type:"/Article" AND language:"en"', "tag": "link-opps"},
-    {"value": 'added_anchor:"american expat tax" AND page_type:"/Article" AND language:"en"', "tag": "link-opps"},
-    {"value": 'page_type:"/Article/Roundup" AND added:"expat tax" AND language:"en"', "tag": "link-listicle"},
-    {"value": 'page_type:"/Article/Listicle" AND added:"expat tax" AND language:"en"', "tag": "link-listicle"},
-    {"value": 'page_type:"/Article/Roundup" AND added:"US expat" AND language:"en"', "tag": "link-listicle"},
-    {"value": 'page_type:"/Article/Listicle" AND (added:"FBAR" OR added:"FATCA") AND language:"en"', "tag": "link-listicle"},
-    {"value": 'page_type:"/Article/Listicle" AND added:"streamlined filing" AND language:"en"', "tag": "link-listicle"},
     # --- Brand & Citation Monitoring (6 rules) ---
     {"value": 'added:"Taxes for Expats" AND language:"en"', "tag": "brand"},
     {"value": 'added_anchor:"Taxes for Expats" AND language:"en"', "tag": "brand"},
@@ -405,11 +400,12 @@ def setup_rules():
     print("Setting up rules...")
     existing = api_request("/v1/rules")
     existing_values = {r["value"] for r in existing.get("data", [])}
+    existing_count = len(existing_values)
 
     created = 0
     for rule in EXAMPLE_RULES:
         if rule["value"] in existing_values:
-            print(f"  [SKIP] Already exists: {rule['tag']}")
+            print(f"  [SKIP] Already exists: {rule['tag']} -- {rule['value'][:60]}")
             continue
         try:
             result = api_request("/v1/rules", method="POST", body=rule)
@@ -420,7 +416,7 @@ def setup_rules():
             body = e.read().decode()
             print(f"  [FAIL] {rule['tag']}: {e.code} -- {body}", file=sys.stderr)
 
-    print(f"\nCreated {created} rules. Total: {created + len(existing_values)}/25")
+    print(f"\nCreated {created} new rules. Total active: {existing_count + created}/25")
 
 
 # ── Main ───────────────────────────────────────────────────────
