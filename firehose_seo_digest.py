@@ -6,8 +6,11 @@ Firehose Daily SEO Digest — taxesforexpats.com
 import json
 import os
 import sys
+import smtplib
 import urllib.request
 import urllib.error
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from datetime import datetime, timezone
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -23,9 +26,11 @@ LIMIT = int(os.environ.get("FIREHOSE_LIMIT", "10000"))
 TIMEOUT = int(os.environ.get("FIREHOSE_TIMEOUT", "120"))
 
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
-RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
-RESEND_TO = os.environ.get("RESEND_TO", "")
-RESEND_FROM = os.environ.get("RESEND_FROM", "digest@notprovided.eu")
+
+# Gmail SMTP
+GMAIL_USER = os.environ.get("GMAIL_USER", "")
+GMAIL_PASSWORD = os.environ.get("GMAIL_PASSWORD", "")
+EMAIL_TO = os.environ.get("EMAIL_TO", "")
 
 
 # ── Data Model ─────────────────────────────────────────────────
@@ -330,34 +335,28 @@ def send_to_slack(digest: str):
         print(f"  Slack: failed -- {e}", file=sys.stderr)
 
 
-def send_via_resend(html_digest: str, event_count: int):
-    if not RESEND_API_KEY or not RESEND_TO:
+def send_via_gmail(html_digest: str, event_count: int):
+    if not GMAIL_USER or not GMAIL_PASSWORD or not EMAIL_TO:
+        print("  Email: skipped (GMAIL_USER / GMAIL_PASSWORD / EMAIL_TO not set)")
         return
+
     now = datetime.now(timezone.utc)
     subject = f"Firehose SEO Digest — {now:%b %d} — {event_count} events"
-    # Support comma-separated list of recipients
-    recipients = [addr.strip() for addr in RESEND_TO.split(",") if addr.strip()]
-    payload = json.dumps({
-        "from": RESEND_FROM,
-        "to": recipients,
-        "subject": subject,
-        "html": html_digest,
-    }).encode()
-    req = urllib.request.Request(
-        "https://api.resend.com/emails",
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {RESEND_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
+    recipients = [addr.strip() for addr in EMAIL_TO.split(",") if addr.strip()]
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = GMAIL_USER
+    msg["To"] = ", ".join(recipients)
+    msg.attach(MIMEText(html_digest, "html"))
+
     try:
-        with urllib.request.urlopen(req) as resp:
-            result = json.loads(resp.read())
-            print(f"  Resend: sent to {recipients} (id: {result.get('id', 'unknown')})")
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(GMAIL_USER, GMAIL_PASSWORD)
+            server.sendmail(GMAIL_USER, recipients, msg.as_string())
+        print(f"  Email: sent to {recipients}")
     except Exception as e:
-        print(f"  Resend: failed -- {e}", file=sys.stderr)
+        print(f"  Email: failed -- {e}", file=sys.stderr)
 
 
 def save_to_file(digest: str, html_digest: str):
@@ -394,7 +393,6 @@ EXAMPLE_RULES = [
     {"value": 'added:"according to" AND added:"Taxes for Expats" AND language:"en"', "tag": "brand"},
     {"value": 'removed:"Taxes for Expats" AND language:"en"', "tag": "brand"},
     # --- Link Opportunity Discovery (4 rules) ---
-    # NOTE: FBAR removed 2026-04-27, replaced with expat tax preparation
     {"value": 'added_anchor:"expat tax preparation" AND page_type:"/Article" AND language:"en"', "tag": "link-opps"},
     {"value": 'added_anchor:"expat tax filing" AND page_type:"/Article" AND language:"en"', "tag": "link-opps"},
     {"value": 'added_anchor:"US expat taxes" AND page_type:"/Article" AND language:"en"', "tag": "link-opps"},
@@ -403,7 +401,6 @@ EXAMPLE_RULES = [
     {"value": 'domain:"taxesforexpats.com" AND recent:24h', "tag": "own-site"},
 ]
 
-# Rules that should be removed from the API if present
 OBSOLETE_RULE_VALUES = {
     'added_anchor:"FBAR" AND page_type:"/Article" AND language:"en"',
 }
@@ -414,7 +411,6 @@ def setup_rules():
     existing_data = api_request("/v1/rules").get("data", [])
     existing_by_value = {r["value"]: r for r in existing_data}
 
-    # ── Delete obsolete rules ──
     deleted = 0
     for rule in existing_data:
         if rule["value"] in OBSOLETE_RULE_VALUES:
@@ -428,7 +424,6 @@ def setup_rules():
                 body = e.read().decode()
                 print(f"  [FAIL] Delete {rid}: {e.code} -- {body}", file=sys.stderr)
 
-    # ── Create missing rules ──
     created = 0
     for rule in EXAMPLE_RULES:
         if rule["value"] in existing_by_value:
@@ -485,7 +480,7 @@ def main():
     print("4. Delivering...")
     save_to_file(digest, html_digest)
     send_to_slack(digest)
-    send_via_resend(html_digest, len(pages))
+    send_via_gmail(html_digest, len(pages))
 
     print()
     print(digest)
