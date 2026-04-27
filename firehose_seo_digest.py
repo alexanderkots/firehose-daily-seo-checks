@@ -139,7 +139,6 @@ def consume_stream(rules: dict) -> list:
                         payload = json.loads(line[5:].strip())
                         query_ids = payload.get("query_ids", [])
                         qid = query_ids[0] if query_ids else ""
-                        # Пропускаем события от удалённых/неизвестных rule ID
                         if qid not in rules:
                             skipped += 1
                             continue
@@ -244,6 +243,7 @@ def build_html_digest(pages: list) -> str:
         "comp-content": "#3B82F6",
         "brand":        "#FF6B35",
         "own-site":     "#6B7280",
+        "link-opps":    "#8B5CF6",
     }
 
     for tag in sorted(by_tag.keys()):
@@ -335,9 +335,11 @@ def send_via_resend(html_digest: str, event_count: int):
         return
     now = datetime.now(timezone.utc)
     subject = f"Firehose SEO Digest — {now:%b %d} — {event_count} events"
+    # Support comma-separated list of recipients
+    recipients = [addr.strip() for addr in RESEND_TO.split(",") if addr.strip()]
     payload = json.dumps({
         "from": RESEND_FROM,
-        "to": [RESEND_TO],
+        "to": recipients,
         "subject": subject,
         "html": html_digest,
     }).encode()
@@ -353,7 +355,7 @@ def send_via_resend(html_digest: str, event_count: int):
     try:
         with urllib.request.urlopen(req) as resp:
             result = json.loads(resp.read())
-            print(f"  Resend: sent (id: {result.get('id', 'unknown')})")
+            print(f"  Resend: sent to {recipients} (id: {result.get('id', 'unknown')})")
     except Exception as e:
         print(f"  Resend: failed -- {e}", file=sys.stderr)
 
@@ -391,20 +393,45 @@ EXAMPLE_RULES = [
     {"value": 'added:"TFX" AND added:"expat tax" AND language:"en"', "tag": "brand"},
     {"value": 'added:"according to" AND added:"Taxes for Expats" AND language:"en"', "tag": "brand"},
     {"value": 'removed:"Taxes for Expats" AND language:"en"', "tag": "brand"},
+    # --- Link Opportunity Discovery (4 rules) ---
+    # NOTE: FBAR removed 2026-04-27, replaced with expat tax preparation
+    {"value": 'added_anchor:"expat tax preparation" AND page_type:"/Article" AND language:"en"', "tag": "link-opps"},
+    {"value": 'added_anchor:"expat tax filing" AND page_type:"/Article" AND language:"en"', "tag": "link-opps"},
+    {"value": 'added_anchor:"US expat taxes" AND page_type:"/Article" AND language:"en"', "tag": "link-opps"},
+    {"value": 'added_anchor:"expat tax" AND page_type:"/Article" AND language:"en"', "tag": "link-opps"},
     # --- Own Site (1 rule) ---
-    {"value": 'domain:"taxesforexpats.com" AND recent:24h', "tag": "own-site", "quality": False},
+    {"value": 'domain:"taxesforexpats.com" AND recent:24h', "tag": "own-site"},
 ]
+
+# Rules that should be removed from the API if present
+OBSOLETE_RULE_VALUES = {
+    'added_anchor:"FBAR" AND page_type:"/Article" AND language:"en"',
+}
 
 
 def setup_rules():
     print("Setting up rules...")
-    existing = api_request("/v1/rules")
-    existing_values = {r["value"] for r in existing.get("data", [])}
-    existing_count = len(existing_values)
+    existing_data = api_request("/v1/rules").get("data", [])
+    existing_by_value = {r["value"]: r for r in existing_data}
 
+    # ── Delete obsolete rules ──
+    deleted = 0
+    for rule in existing_data:
+        if rule["value"] in OBSOLETE_RULE_VALUES:
+            rid = rule["id"]
+            try:
+                api_request(f"/v1/rules/{rid}", method="DELETE")
+                print(f"  [DEL]  Removed obsolete rule {rid}: {rule['value'][:60]}")
+                del existing_by_value[rule["value"]]
+                deleted += 1
+            except urllib.error.HTTPError as e:
+                body = e.read().decode()
+                print(f"  [FAIL] Delete {rid}: {e.code} -- {body}", file=sys.stderr)
+
+    # ── Create missing rules ──
     created = 0
     for rule in EXAMPLE_RULES:
-        if rule["value"] in existing_values:
+        if rule["value"] in existing_by_value:
             print(f"  [SKIP] Already exists: {rule['tag']} -- {rule['value'][:60]}")
             continue
         try:
@@ -416,7 +443,8 @@ def setup_rules():
             body = e.read().decode()
             print(f"  [FAIL] {rule['tag']}: {e.code} -- {body}", file=sys.stderr)
 
-    print(f"\nCreated {created} new rules. Total active: {existing_count + created}/25")
+    total = len(existing_by_value) - deleted + created
+    print(f"\nDeleted {deleted} obsolete rules. Created {created} new rules. Total active: {total}/25")
 
 
 # ── Main ───────────────────────────────────────────────────────
